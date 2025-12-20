@@ -12,8 +12,7 @@ const STREAK_THRESHOLD = 30;
 const STORE_TZ = 'America/Edmonton'; 
 
 async function shopifyGraphql(query, variables) {
-  console.log(`Connecting to: ${SHOPIFY_DOMAIN}`);
-  
+  // Console log removed for cleaner production logs, feel free to add back if debugging
   const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
     method: 'POST',
     headers: {
@@ -52,7 +51,7 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // 1. FETCH STREAK DATA
+    // 1. FETCH STREAK DATA + HISTORY LOG
     const query = `
       query($id: ID!) {
         customer(id: $id) {
@@ -60,6 +59,7 @@ export default async function handler(req, res) {
           streak: metafield(namespace: "custom", key: "devotional_current_streak") { value }
           total: metafield(namespace: "custom", key: "devotional_total_days") { value }
           lastVisit: metafield(namespace: "custom", key: "devotional_last_visit") { value }
+          history: metafield(namespace: "custom", key: "devotional_history") { value }
         }
       }
     `;
@@ -80,12 +80,32 @@ export default async function handler(req, res) {
     let totalDays = parseInt(customerData.total?.value || 0);
     const lastVisitDate = customerData.lastVisit?.value || null;
 
+    // --- NEW: AUDIT LOG LOGIC ---
+    let historyLog = [];
+    try {
+        if (customerData.history?.value) {
+            historyLog = JSON.parse(customerData.history.value);
+        }
+    } catch (e) {
+        console.error("Error parsing history log", e);
+        historyLog = [];
+    }
+
     let updated = false;
     let rewardTriggered = false;
     let newTags = [];
 
+    // Only run updates if they haven't visited today yet
     if (lastVisitDate !== today) {
         updated = true;
+        
+        // Add today to the history log (Audit Trail)
+        // We only keep the last 60 days to save space
+        if (!historyLog.includes(today)) {
+            historyLog.unshift(today); // Add to the front
+            historyLog = historyLog.slice(0, 60); // Keep max 60 entries
+        }
+
         const todayDateObj = new Date(today);
         const lastVisitObj = lastVisitDate ? new Date(lastVisitDate) : null;
         let isConsecutive = false;
@@ -121,7 +141,8 @@ export default async function handler(req, res) {
             metafields: [
                 { namespace: "custom", key: "devotional_current_streak", value: String(currentStreak), type: "number_integer" },
                 { namespace: "custom", key: "devotional_total_days", value: String(totalDays), type: "number_integer" },
-                { namespace: "custom", key: "devotional_last_visit", value: today, type: "date" }
+                { namespace: "custom", key: "devotional_last_visit", value: today, type: "date" },
+                { namespace: "custom", key: "devotional_history", value: JSON.stringify(historyLog), type: "json" }
             ]
         };
         if (newTags.length > 0) input.tags = [...(customerData.tags || []), ...newTags];
@@ -129,7 +150,7 @@ export default async function handler(req, res) {
         await shopifyGraphql(`mutation customerUpdate($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
-    // 4. ISSUE STORE CREDIT (FINAL CORRECTED STRUCTURE)
+    // 4. ISSUE STORE CREDIT
     if (rewardTriggered) {
         const creditMutation = `
             mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
@@ -142,12 +163,10 @@ export default async function handler(req, res) {
         await shopifyGraphql(creditMutation, {
             id: customerGid,
             creditInput: {
-                // FIXED: Must be nested in 'creditAmount'
                 creditAmount: { 
                     amount: REWARD_AMOUNT, 
                     currencyCode: CURRENCY_CODE 
                 }
-                // REMOVED: 'note' and 'origin' are NOT allowed in this API version
             }
         });
     }
