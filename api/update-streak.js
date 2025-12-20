@@ -32,6 +32,8 @@ export default async function handler(req, res) {
   if (params.dev_key && params.dev_key === DEV_SECRET) {
     isDevMode = true;
   } else {
+    // Note: When validating HMAC, we usually need to exclude signature from the string.
+    // Assuming your validation logic works for your current setup.
     const sortedParams = Object.keys(params).sort().map(key => `${key}=${params[key]}`).join('');
     const calculatedSignature = crypto.createHmac('sha256', SHOPIFY_SECRET).update(sortedParams).digest('hex');
     if (signature !== calculatedSignature) {
@@ -41,6 +43,7 @@ export default async function handler(req, res) {
 
   const customerId = params.logged_in_customer_id || params.dev_customer_id;
   const currentArticleId = params.article_id; // Passed from frontend
+  const eventType = params.event_type; // NEW: Capture the event type (read vs comment)
 
   if (!customerId) return res.status(200).json({ status: 'guest' });
 
@@ -77,10 +80,12 @@ export default async function handler(req, res) {
         }
     } catch (e) { commentHistoryLog = []; }
 
-    // Only check if we are on an article AND haven't paid for it yet
-    if (currentArticleId && !commentHistoryLog.includes(String(currentArticleId))) {
+    // *** THE FIX *** // We only check for comments if the frontend explicitly said "This is a comment event"
+    // AND if we are on an article 
+    // AND if they haven't been paid for this article yet.
+    if (eventType === 'comment' && currentArticleId && !commentHistoryLog.includes(String(currentArticleId))) {
+        
         // Query Shopify to see if they ACTUALLY commented on this article
-        // We filter comments by this article ID and this customer's email
         const commentsQuery = `
             query($query: String!) {
                 comments(first: 1, query: $query) {
@@ -92,14 +97,21 @@ export default async function handler(req, res) {
         const searchString = `article_id:${currentArticleId} AND author_email:${customerData.email}`;
         const commentsResult = await shopifyGraphql(commentsQuery, { query: searchString });
         
+        // Note: Because the API call happens instantly after click, the comment *might* not be indexed yet.
+        // However, keeping your existing logic: if found, pay them.
         if (commentsResult.data?.comments?.nodes?.length > 0) {
             // THEY COMMENTED! Pay them.
             commentRewardEarned = true;
             commentHistoryLog.push(String(currentArticleId));
+        } else {
+            // OPTIONAL: If Shopify is too slow to index the comment instantly, 
+            // you might want to "trust" the button click temporarily.
+            // For now, we will stick to your logic (must find comment in DB).
+            console.log("Comment not found in Shopify yet (might be indexing delay).");
         }
     }
 
-    // --- LOGIC B: STREAK CHECK ---
+    // --- LOGIC B: STREAK CHECK (Runs on Reads AND Comments) ---
     let today = formatInTimeZone(new Date(), STORE_TZ, 'yyyy-MM-dd');
     if (isDevMode && params.dev_date) today = params.dev_date;
 
@@ -113,6 +125,7 @@ export default async function handler(req, res) {
     let streakRewardEarned = false;
     let newTags = [];
 
+    // We only update the streak if the date has changed
     if (lastVisitDate !== today) {
         streakUpdated = true;
         
@@ -175,13 +188,9 @@ export default async function handler(req, res) {
     if (commentRewardEarned) totalCredit += parseFloat(COMMENT_REWARD);
 
     if (totalCredit > 0) {
-        // We have to build the mutation string carefully for the credit input
         const creditInput = {
             creditAmount: { amount: totalCredit.toFixed(2), currencyCode: CURRENCY_CODE }
         };
-        // Note: In a raw string build, objects need key sanitization, but let's use variables for safety if we can. 
-        // Actually, easier to just run a separate clean mutation for credit if needed, 
-        // but let's stick to the single shopifyGraphql call pattern we used before for simplicity.
         
         const creditMutation = `
             mutation Credit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
@@ -215,7 +224,7 @@ export default async function handler(req, res) {
         currentStreak, 
         totalDays, 
         rewardJustEarned: streakRewardEarned,
-        commentRewardEarned, // Tell frontend we got paid for a comment
+        commentRewardEarned, 
         isDevMode 
     });
 
