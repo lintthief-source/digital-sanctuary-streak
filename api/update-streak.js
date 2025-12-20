@@ -129,7 +129,7 @@ export default async function handler(req, res) {
         await shopifyGraphql(`mutation customerUpdate($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
-    // 4. ISSUE STORE CREDIT (CORRECTED STRUCTURE)
+    // 4. ISSUE STORE CREDIT (FINAL CORRECTED STRUCTURE)
     if (rewardTriggered) {
         const creditMutation = `
             mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
@@ -146,9 +146,8 @@ export default async function handler(req, res) {
                 creditAmount: { 
                     amount: REWARD_AMOUNT, 
                     currencyCode: CURRENCY_CODE 
-                },
-                // FIXED: Use 'note' instead of 'origin'
-                note: "Devotional Streak Reward"
+                }
+                // REMOVED: 'note' and 'origin' are NOT allowed in this API version
             }
         });
     }
