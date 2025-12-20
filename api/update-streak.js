@@ -6,13 +6,12 @@ const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const DEV_SECRET = process.env.DEV_MODE_KEY; 
 
-const CURRENCY_CODE = 'CAD'; // Change to 'USD' if your store is in US Dollars
+const CURRENCY_CODE = 'CAD'; 
 const REWARD_AMOUNT = "0.90";
 const STREAK_THRESHOLD = 30; 
 const STORE_TZ = 'America/Edmonton'; 
 
 async function shopifyGraphql(query, variables) {
-  // DEBUG LOG
   console.log(`Connecting to: ${SHOPIFY_DOMAIN}`);
   
   const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
@@ -53,7 +52,7 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // --- FIX: UPDATED QUERY STRUCTURE ---
+    // 1. FETCH STREAK DATA ONLY (No need to look for accounts)
     const query = `
       query($id: ID!) {
         customer(id: $id) {
@@ -61,16 +60,6 @@ export default async function handler(req, res) {
           streak: metafield(namespace: "custom", key: "devotional_current_streak") { value }
           total: metafield(namespace: "custom", key: "devotional_total_days") { value }
           lastVisit: metafield(namespace: "custom", key: "devotional_last_visit") { value }
-          storeCreditAccounts(first: 5) {
-            edges {
-              node {
-                id
-                balance {
-                  currencyCode
-                }
-              }
-            }
-          }
         }
       }
     `;
@@ -83,7 +72,7 @@ export default async function handler(req, res) {
 
     const customerData = result.data.customer;
 
-    // --- LOGIC START ---
+    // 2. CALCULATE STREAK
     let today = formatInTimeZone(new Date(), STORE_TZ, 'yyyy-MM-dd');
     if (isDevMode && params.dev_date) today = params.dev_date;
 
@@ -125,6 +114,7 @@ export default async function handler(req, res) {
         }
     }
 
+    // 3. SAVE UPDATES
     if (updated || newTags.length > 0) {
         const input = {
             id: customerGid,
@@ -139,23 +129,24 @@ export default async function handler(req, res) {
         await shopifyGraphql(`mutation customerUpdate($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
+    // 4. ISSUE STORE CREDIT (Simplified)
     if (rewardTriggered) {
-        const accounts = customerData.storeCreditAccounts?.edges || [];
+        // We pass the CUSTOMER ID directly. Shopify auto-creates the account if needed.
+        const creditMutation = `
+            mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+                storeCreditAccountCredit(id: $id, creditInput: $creditInput) { 
+                    userErrors { message } 
+                }
+            }
+        `;
         
-        // --- FIX: LOOK INSIDE BALANCE FOR CURRENCY ---
-        let accountId = accounts.find(edge => edge.node.balance?.currencyCode === CURRENCY_CODE)?.node.id;
-
-        if (!accountId) {
-             const createRes = await shopifyGraphql(`mutation storeCreditAccountCreate($customerId: ID!, $currency: CurrencyCode!) { storeCreditAccountCreate(customerId: $customerId, currency: $currency) { storeCreditAccount { id } } }`, { customerId: customerGid, currency: CURRENCY_CODE });
-             accountId = createRes.data?.storeCreditAccountCreate?.storeCreditAccount?.id;
-        }
-
-        if (accountId) {
-            await shopifyGraphql(`mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) { storeCreditAccountCredit(id: $id, creditInput: $creditInput) { userErrors { message } } }`, {
-                id: accountId,
-                creditInput: { amount: { amount: REWARD_AMOUNT, currencyCode: CURRENCY_CODE }, origin: "Devotional Streak Reward" }
-            });
-        }
+        await shopifyGraphql(creditMutation, {
+            id: customerGid, // Using Customer ID here!
+            creditInput: {
+                amount: { amount: REWARD_AMOUNT, currencyCode: CURRENCY_CODE },
+                origin: "Devotional Streak Reward"
+            }
+        });
     }
 
     return res.status(200).json({ currentStreak, totalDays, rewardJustEarned: rewardTriggered, isDevMode, dateRecorded: today });
