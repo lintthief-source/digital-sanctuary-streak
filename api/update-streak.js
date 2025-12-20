@@ -7,12 +7,12 @@ const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const DEV_SECRET = process.env.DEV_MODE_KEY; 
 
 const CURRENCY_CODE = 'CAD'; 
-const REWARD_AMOUNT = "0.90";
+const STREAK_REWARD = "0.90";
+const COMMENT_REWARD = "0.05";
 const STREAK_THRESHOLD = 30; 
 const STORE_TZ = 'America/Edmonton'; 
 
 async function shopifyGraphql(query, variables) {
-  // Console log removed for cleaner production logs, feel free to add back if debugging
   const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
     method: 'POST',
     headers: {
@@ -21,19 +21,13 @@ async function shopifyGraphql(query, variables) {
     },
     body: JSON.stringify({ query, variables }),
   });
-
-  const result = await response.json();
-
-  if (result.errors || !result.data) {
-    console.error("❌ SHOPIFY API ERROR:", JSON.stringify(result, null, 2));
-  }
-
-  return result;
+  return await response.json();
 }
 
 export default async function handler(req, res) {
   const { signature, ...params } = req.query;
 
+  // 1. SECURITY CHECK
   let isDevMode = false;
   if (params.dev_key && params.dev_key === DEV_SECRET) {
     isDevMode = true;
@@ -46,64 +40,86 @@ export default async function handler(req, res) {
   }
 
   const customerId = params.logged_in_customer_id || params.dev_customer_id;
+  const currentArticleId = params.article_id; // Passed from frontend
+
   if (!customerId) return res.status(200).json({ status: 'guest' });
 
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // 1. FETCH STREAK DATA + HISTORY LOG
+    // 2. FETCH EVERYTHING (Streak + Email + Comment History)
     const query = `
       query($id: ID!) {
         customer(id: $id) {
+          id
+          email
           tags
           streak: metafield(namespace: "custom", key: "devotional_current_streak") { value }
           total: metafield(namespace: "custom", key: "devotional_total_days") { value }
           lastVisit: metafield(namespace: "custom", key: "devotional_last_visit") { value }
           history: metafield(namespace: "custom", key: "devotional_history") { value }
+          commentHistory: metafield(namespace: "custom", key: "devotional_comment_history") { value }
         }
       }
     `;
     
     const result = await shopifyGraphql(query, { id: customerGid });
-    
-    if (!result.data || !result.data.customer) {
-        return res.status(500).json({ error: "Shopify Data Fetch Failed", details: result.errors });
+    const customerData = result.data?.customer;
+
+    if (!customerData) return res.status(500).json({ error: "Customer fetch failed" });
+
+    // --- LOGIC A: COMMENTS CHECK ---
+    let commentRewardEarned = false;
+    let commentHistoryLog = [];
+    try {
+        if (customerData.commentHistory?.value) {
+            commentHistoryLog = JSON.parse(customerData.commentHistory.value);
+        }
+    } catch (e) { commentHistoryLog = []; }
+
+    // Only check if we are on an article AND haven't paid for it yet
+    if (currentArticleId && !commentHistoryLog.includes(String(currentArticleId))) {
+        // Query Shopify to see if they ACTUALLY commented on this article
+        // We filter comments by this article ID and this customer's email
+        const commentsQuery = `
+            query($query: String!) {
+                comments(first: 1, query: $query) {
+                    nodes { id }
+                }
+            }
+        `;
+        // Search query: "article_id:123 AND author_email:bob@test.com"
+        const searchString = `article_id:${currentArticleId} AND author_email:${customerData.email}`;
+        const commentsResult = await shopifyGraphql(commentsQuery, { query: searchString });
+        
+        if (commentsResult.data?.comments?.nodes?.length > 0) {
+            // THEY COMMENTED! Pay them.
+            commentRewardEarned = true;
+            commentHistoryLog.push(String(currentArticleId));
+        }
     }
 
-    const customerData = result.data.customer;
-
-    // 2. CALCULATE STREAK
+    // --- LOGIC B: STREAK CHECK ---
     let today = formatInTimeZone(new Date(), STORE_TZ, 'yyyy-MM-dd');
     if (isDevMode && params.dev_date) today = params.dev_date;
 
     let currentStreak = parseInt(customerData.streak?.value || 0);
     let totalDays = parseInt(customerData.total?.value || 0);
     const lastVisitDate = customerData.lastVisit?.value || null;
-
-    // --- NEW: AUDIT LOG LOGIC ---
     let historyLog = [];
-    try {
-        if (customerData.history?.value) {
-            historyLog = JSON.parse(customerData.history.value);
-        }
-    } catch (e) {
-        console.error("Error parsing history log", e);
-        historyLog = [];
-    }
+    try { if (customerData.history?.value) historyLog = JSON.parse(customerData.history.value); } catch (e) {}
 
-    let updated = false;
-    let rewardTriggered = false;
+    let streakUpdated = false;
+    let streakRewardEarned = false;
     let newTags = [];
 
-    // Only run updates if they haven't visited today yet
     if (lastVisitDate !== today) {
-        updated = true;
+        streakUpdated = true;
         
-        // Add today to the history log (Audit Trail)
-        // We only keep the last 60 days to save space
+        // Audit Trail
         if (!historyLog.includes(today)) {
-            historyLog.unshift(today); // Add to the front
-            historyLog = historyLog.slice(0, 60); // Keep max 60 entries
+            historyLog.unshift(today);
+            historyLog = historyLog.slice(0, 60);
         }
 
         const todayDateObj = new Date(today);
@@ -115,63 +131,93 @@ export default async function handler(req, res) {
             if (diffDays === 1) isConsecutive = true;
         }
 
-        if (isConsecutive) {
-            currentStreak += 1;
-        } else {
-            currentStreak = 1; 
-        }
+        if (isConsecutive) currentStreak += 1;
+        else currentStreak = 1; 
+        
         totalDays += 1;
 
-        if ([7, 30, 60, 100, 365].includes(currentStreak)) {
+        if ([7, 15, 30, 60, 100, 365].includes(currentStreak)) {
              const tagToAdd = `Streak: ${currentStreak} Days`;
-             const currentTags = customerData.tags || [];
-             if (!currentTags.includes(tagToAdd)) newTags.push(tagToAdd);
+             if (!customerData.tags.includes(tagToAdd)) newTags.push(tagToAdd);
         }
 
         if (currentStreak === STREAK_THRESHOLD) {
             currentStreak = 0; 
-            rewardTriggered = true;
+            streakRewardEarned = true;
         }
     }
 
-    // 3. SAVE UPDATES
-    if (updated || newTags.length > 0) {
+    // --- LOGIC C: SAVE & PAY ---
+    const mutationOps = [];
+    let totalCredit = 0;
+
+    // 1. Prepare Streak/History Update
+    if (streakUpdated || newTags.length > 0 || commentRewardEarned) {
+        const inputs = [
+            { namespace: "custom", key: "devotional_current_streak", value: String(currentStreak), type: "number_integer" },
+            { namespace: "custom", key: "devotional_total_days", value: String(totalDays), type: "number_integer" },
+            { namespace: "custom", key: "devotional_last_visit", value: today, type: "date" },
+            { namespace: "custom", key: "devotional_history", value: JSON.stringify(historyLog), type: "json" },
+            { namespace: "custom", key: "devotional_comment_history", value: JSON.stringify(commentHistoryLog), type: "json" }
+        ];
+
+        const customerInput = {
+            id: customerGid,
+            metafields: inputs
+        };
+        if (newTags.length > 0) customerInput.tags = [...customerData.tags, ...newTags];
+        
+        mutationOps.push(`customerUpdate(input: ${JSON.stringify(customerInput).replace(/"([^"]+)":/g, '$1:')}) { userErrors { field message } }`);
+    }
+
+    // 2. Prepare Credit
+    if (streakRewardEarned) totalCredit += parseFloat(STREAK_REWARD);
+    if (commentRewardEarned) totalCredit += parseFloat(COMMENT_REWARD);
+
+    if (totalCredit > 0) {
+        // We have to build the mutation string carefully for the credit input
+        const creditInput = {
+            creditAmount: { amount: totalCredit.toFixed(2), currencyCode: CURRENCY_CODE }
+        };
+        // Note: In a raw string build, objects need key sanitization, but let's use variables for safety if we can. 
+        // Actually, easier to just run a separate clean mutation for credit if needed, 
+        // but let's stick to the single shopifyGraphql call pattern we used before for simplicity.
+        
+        const creditMutation = `
+            mutation Credit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
+                storeCreditAccountCredit(id: $id, creditInput: $creditInput) { userErrors { message } }
+            }
+        `;
+        await shopifyGraphql(creditMutation, {
+            id: customerGid,
+            creditInput
+        });
+    }
+
+    // 3. Save Metafields (if any changes)
+    if (streakUpdated || commentRewardEarned) {
         const input = {
             id: customerGid,
             metafields: [
                 { namespace: "custom", key: "devotional_current_streak", value: String(currentStreak), type: "number_integer" },
                 { namespace: "custom", key: "devotional_total_days", value: String(totalDays), type: "number_integer" },
                 { namespace: "custom", key: "devotional_last_visit", value: today, type: "date" },
-                { namespace: "custom", key: "devotional_history", value: JSON.stringify(historyLog), type: "json" }
+                { namespace: "custom", key: "devotional_history", value: JSON.stringify(historyLog), type: "json" },
+                { namespace: "custom", key: "devotional_comment_history", value: JSON.stringify(commentHistoryLog), type: "json" }
             ]
         };
-        if (newTags.length > 0) input.tags = [...(customerData.tags || []), ...newTags];
+        if (newTags.length > 0) input.tags = [...customerData.tags, ...newTags];
         
-        await shopifyGraphql(`mutation customerUpdate($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
+        await shopifyGraphql(`mutation Update($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
-    // 4. ISSUE STORE CREDIT
-    if (rewardTriggered) {
-        const creditMutation = `
-            mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
-                storeCreditAccountCredit(id: $id, creditInput: $creditInput) { 
-                    userErrors { message } 
-                }
-            }
-        `;
-        
-        await shopifyGraphql(creditMutation, {
-            id: customerGid,
-            creditInput: {
-                creditAmount: { 
-                    amount: REWARD_AMOUNT, 
-                    currencyCode: CURRENCY_CODE 
-                }
-            }
-        });
-    }
-
-    return res.status(200).json({ currentStreak, totalDays, rewardJustEarned: rewardTriggered, isDevMode, dateRecorded: today });
+    return res.status(200).json({ 
+        currentStreak, 
+        totalDays, 
+        rewardJustEarned: streakRewardEarned,
+        commentRewardEarned, // Tell frontend we got paid for a comment
+        isDevMode 
+    });
 
   } catch (error) {
     console.error("CRITICAL SERVER ERROR:", error);
