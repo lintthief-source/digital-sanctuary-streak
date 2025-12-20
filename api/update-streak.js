@@ -52,7 +52,7 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // 1. FETCH STREAK DATA ONLY (No need to look for accounts)
+    // 1. FETCH STREAK DATA
     const query = `
       query($id: ID!) {
         customer(id: $id) {
@@ -129,9 +129,8 @@ export default async function handler(req, res) {
         await shopifyGraphql(`mutation customerUpdate($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
-    // 4. ISSUE STORE CREDIT (Simplified)
+    // 4. ISSUE STORE CREDIT (CORRECTED STRUCTURE)
     if (rewardTriggered) {
-        // We pass the CUSTOMER ID directly. Shopify auto-creates the account if needed.
         const creditMutation = `
             mutation storeCreditAccountCredit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
                 storeCreditAccountCredit(id: $id, creditInput: $creditInput) { 
@@ -141,10 +140,15 @@ export default async function handler(req, res) {
         `;
         
         await shopifyGraphql(creditMutation, {
-            id: customerGid, // Using Customer ID here!
+            id: customerGid,
             creditInput: {
-                amount: { amount: REWARD_AMOUNT, currencyCode: CURRENCY_CODE },
-                origin: "Devotional Streak Reward"
+                // FIXED: Must be nested in 'creditAmount'
+                creditAmount: { 
+                    amount: REWARD_AMOUNT, 
+                    currencyCode: CURRENCY_CODE 
+                },
+                // FIXED: Use 'note' instead of 'origin'
+                note: "Devotional Streak Reward"
             }
         });
     }
