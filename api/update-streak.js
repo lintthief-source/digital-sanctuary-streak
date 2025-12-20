@@ -6,13 +6,13 @@ const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const DEV_SECRET = process.env.DEV_MODE_KEY; 
 
-const CURRENCY_CODE = 'CAD'; 
+const CURRENCY_CODE = 'CAD'; // Change to 'USD' if your store is in US Dollars
 const REWARD_AMOUNT = "0.90";
 const STREAK_THRESHOLD = 30; 
 const STORE_TZ = 'America/Edmonton'; 
 
 async function shopifyGraphql(query, variables) {
-  // DEBUG LOG: Verify we are using the right credentials
+  // DEBUG LOG
   console.log(`Connecting to: ${SHOPIFY_DOMAIN}`);
   
   const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
@@ -26,11 +26,8 @@ async function shopifyGraphql(query, variables) {
 
   const result = await response.json();
 
-  // *** CRITICAL DEBUGGING ***
-  // If Shopify says "NO", log the reason!
   if (result.errors || !result.data) {
     console.error("❌ SHOPIFY API ERROR:", JSON.stringify(result, null, 2));
-    if (!result.data) console.error("❌ DATA WAS MISSING entirely.");
   }
 
   return result;
@@ -56,6 +53,7 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
+    // --- FIX: UPDATED QUERY STRUCTURE ---
     const query = `
       query($id: ID!) {
         customer(id: $id) {
@@ -64,16 +62,21 @@ export default async function handler(req, res) {
           total: metafield(namespace: "custom", key: "devotional_total_days") { value }
           lastVisit: metafield(namespace: "custom", key: "devotional_last_visit") { value }
           storeCreditAccounts(first: 5) {
-            edges { node { id currency } }
+            edges {
+              node {
+                id
+                balance {
+                  currencyCode
+                }
+              }
+            }
           }
         }
       }
     `;
     
-    // FETCH DATA
     const result = await shopifyGraphql(query, { id: customerGid });
     
-    // Safety Check: If data is missing, stop here instead of crashing
     if (!result.data || !result.data.customer) {
         return res.status(500).json({ error: "Shopify Data Fetch Failed", details: result.errors });
     }
@@ -138,7 +141,9 @@ export default async function handler(req, res) {
 
     if (rewardTriggered) {
         const accounts = customerData.storeCreditAccounts?.edges || [];
-        let accountId = accounts.find(edge => edge.node.currency === CURRENCY_CODE)?.node.id;
+        
+        // --- FIX: LOOK INSIDE BALANCE FOR CURRENCY ---
+        let accountId = accounts.find(edge => edge.node.balance?.currencyCode === CURRENCY_CODE)?.node.id;
 
         if (!accountId) {
              const createRes = await shopifyGraphql(`mutation storeCreditAccountCreate($customerId: ID!, $currency: CurrencyCode!) { storeCreditAccountCreate(customerId: $customerId, currency: $currency) { storeCreditAccount { id } } }`, { customerId: customerGid, currency: CURRENCY_CODE });
