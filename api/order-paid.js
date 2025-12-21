@@ -19,7 +19,6 @@ async function getRawBody(readable) {
 }
 
 async function shopifyGraphql(query, variables) {
-  // Matching your other webhook version
   const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2025-10/graphql.json`, {
     method: 'POST',
     headers: {
@@ -43,9 +42,7 @@ export default async function handler(req, res) {
       .update(rawBody)
       .digest('base64');
 
-    if (generatedHash !== hmacHeader) {
-      return res.status(401).send('Unauthorized');
-    }
+    if (generatedHash !== hmacHeader) return res.status(401).send('Unauthorized');
 
     const order = JSON.parse(rawBody.toString());
     const customerId = order.customer?.admin_graphql_api_id;
@@ -57,12 +54,13 @@ export default async function handler(req, res) {
 
     if (parseFloat(rewardAmount) <= 0) return res.status(200).send('No reward');
 
+    // FIXED MUTATION: notify is now a top-level argument, not inside creditInput
     const mutation = `
-      mutation CreditAndNote($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $customerInput: CustomerInput!) {
-        storeCreditAccountCredit(id: $id, creditInput: $creditInput) { 
+      mutation CreditWithNotify($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $notify: Boolean!) {
+        storeCreditAccountCredit(id: $id, creditInput: $creditInput, notify: $notify) { 
           userErrors { message } 
         }
-        customerUpdate(input: $customerInput) {
+        customerUpdate(input: { id: $id, note: "${order.customer?.note || ''}\nIssued $${rewardAmount} credit for Order ${order.name}".trim() }) {
           customer { id }
           userErrors { message }
         }
@@ -72,13 +70,9 @@ export default async function handler(req, res) {
     const variables = {
       id: customerId,
       creditInput: {
-        creditAmount: { amount: rewardAmount, currencyCode: order.currency },
-        notify: true // Triggers the "Store credit issued" email
+        creditAmount: { amount: rewardAmount, currencyCode: order.currency }
       },
-      customerInput: {
-        id: customerId,
-        note: `${order.customer?.note || ''}\nIssued $${rewardAmount} credit for Order ${order.name}`.trim()
-      }
+      notify: true // Correctly placed as a separate variable
     };
 
     const result = await shopifyGraphql(mutation, variables);
@@ -88,7 +82,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Mutation Failed", details: result });
     }
 
-    return res.status(200).send(`Issued $${rewardAmount} with notification`);
+    return res.status(200).send(`Success: Issued $${rewardAmount}`);
 
   } catch (error) {
     return res.status(500).json({ error: error.message });
