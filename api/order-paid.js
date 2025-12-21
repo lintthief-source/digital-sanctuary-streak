@@ -19,7 +19,7 @@ async function getRawBody(readable) {
 }
 
 async function shopifyGraphql(query, variables) {
-  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2025-10/graphql.json`, {
+  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -42,7 +42,9 @@ export default async function handler(req, res) {
       .update(rawBody)
       .digest('base64');
 
-    if (generatedHash !== hmacHeader) return res.status(401).send('Unauthorized');
+    if (generatedHash !== hmacHeader) {
+      return res.status(401).send('Unauthorized');
+    }
 
     const order = JSON.parse(rawBody.toString());
     const customerId = order.customer?.admin_graphql_api_id;
@@ -54,10 +56,9 @@ export default async function handler(req, res) {
 
     if (parseFloat(rewardAmount) <= 0) return res.status(200).send('No reward');
 
-    // notify is now correctly placed as an argument of the mutation itself
     const mutation = `
-      mutation CreditWithNotify($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $notify: Boolean!, $customerInput: CustomerInput!) {
-        storeCreditAccountCredit(id: $id, creditInput: $creditInput, notify: $notify) { 
+      mutation CreditAndNote($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $customerInput: CustomerInput!) {
+        storeCreditAccountCredit(id: $id, creditInput: $creditInput) { 
           userErrors { message } 
         }
         customerUpdate(input: $customerInput) {
@@ -72,21 +73,14 @@ export default async function handler(req, res) {
       creditInput: {
         creditAmount: { amount: rewardAmount, currencyCode: order.currency }
       },
-      notify: true,
       customerInput: {
         id: customerId,
         note: `${order.customer?.note || ''}\nIssued $${rewardAmount} credit for Order ${order.name}`.trim()
       }
     };
 
-    const result = await shopifyGraphql(mutation, variables);
-
-    if (result.errors || result.data?.storeCreditAccountCredit?.userErrors?.length > 0) {
-      console.error("Shopify Error Details:", JSON.stringify(result));
-      return res.status(500).json({ error: "Mutation Failed", details: result });
-    }
-
-    return res.status(200).send(`Success: Issued $${rewardAmount} with notification`);
+    await shopifyGraphql(mutation, variables);
+    return res.status(200).send(`Issued $${rewardAmount}`);
 
   } catch (error) {
     return res.status(500).json({ error: error.message });
