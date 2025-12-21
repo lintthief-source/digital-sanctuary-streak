@@ -19,8 +19,7 @@ async function getRawBody(readable) {
 }
 
 async function shopifyGraphql(query, variables) {
-  // Updated to 2025-10 to support the notify parameter
-  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2025-10/graphql.json`, {
+  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -72,8 +71,7 @@ export default async function handler(req, res) {
     const variables = {
       id: customerId,
       creditInput: {
-        creditAmount: { amount: rewardAmount, currencyCode: order.currency },
-        notify: true // This triggers the Shopify notification email
+        creditAmount: { amount: rewardAmount, currencyCode: order.currency }
       },
       customerInput: {
         id: customerId,
@@ -82,7 +80,7 @@ export default async function handler(req, res) {
     };
 
     await shopifyGraphql(mutation, variables);
-    return res.status(200).send(`Issued $${rewardAmount} with notification`);
+    return res.status(200).send(`Issued $${rewardAmount}`);
 
   } catch (error) {
     return res.status(500).json({ error: error.message });
