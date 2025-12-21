@@ -32,8 +32,6 @@ export default async function handler(req, res) {
   if (params.dev_key && params.dev_key === DEV_SECRET) {
     isDevMode = true;
   } else {
-    // Note: When validating HMAC, we usually need to exclude signature from the string.
-    // Assuming your validation logic works for your current setup.
     const sortedParams = Object.keys(params).sort().map(key => `${key}=${params[key]}`).join('');
     const calculatedSignature = crypto.createHmac('sha256', SHOPIFY_SECRET).update(sortedParams).digest('hex');
     if (signature !== calculatedSignature) {
@@ -42,21 +40,33 @@ export default async function handler(req, res) {
   }
 
   const customerId = params.logged_in_customer_id || params.dev_customer_id;
-  const currentArticleId = params.article_id; // Passed from frontend
-  const eventType = params.event_type; // NEW: Capture the event type (read vs comment)
+  const currentArticleId = params.article_id; 
+  const eventType = params.event_type; 
 
   if (!customerId) return res.status(200).json({ status: 'guest' });
 
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // 2. FETCH EVERYTHING (Streak + Email + Comment History)
+    // 2. FETCH EVERYTHING (NOW INCLUDES NAME & CREDIT)
     const query = `
       query($id: ID!) {
         customer(id: $id) {
           id
           email
+          firstName 
           tags
+          # FETCH STORE CREDIT BALANCE
+          storeCreditAccounts(first: 1) {
+            edges {
+              node {
+                balance {
+                  amount
+                  currencyCode
+                }
+              }
+            }
+          }
           streak: metafield(namespace: "custom", key: "devotional_current_streak") { value }
           total: metafield(namespace: "custom", key: "devotional_total_days") { value }
           lastVisit: metafield(namespace: "custom", key: "devotional_last_visit") { value }
@@ -80,38 +90,20 @@ export default async function handler(req, res) {
         }
     } catch (e) { commentHistoryLog = []; }
 
-    // *** THE FIX *** // We only check for comments if the frontend explicitly said "This is a comment event"
-    // AND if we are on an article 
-    // AND if they haven't been paid for this article yet.
     if (eventType === 'comment' && currentArticleId && !commentHistoryLog.includes(String(currentArticleId))) {
-        
-        // Query Shopify to see if they ACTUALLY commented on this article
-        const commentsQuery = `
-            query($query: String!) {
-                comments(first: 1, query: $query) {
-                    nodes { id }
-                }
-            }
-        `;
-        // Search query: "article_id:123 AND author_email:bob@test.com"
+        const commentsQuery = `query($query: String!) { comments(first: 1, query: $query) { nodes { id } } }`;
         const searchString = `article_id:${currentArticleId} AND author_email:${customerData.email}`;
         const commentsResult = await shopifyGraphql(commentsQuery, { query: searchString });
         
-        // Note: Because the API call happens instantly after click, the comment *might* not be indexed yet.
-        // However, keeping your existing logic: if found, pay them.
         if (commentsResult.data?.comments?.nodes?.length > 0) {
-            // THEY COMMENTED! Pay them.
             commentRewardEarned = true;
             commentHistoryLog.push(String(currentArticleId));
         } else {
-            // OPTIONAL: If Shopify is too slow to index the comment instantly, 
-            // you might want to "trust" the button click temporarily.
-            // For now, we will stick to your logic (must find comment in DB).
             console.log("Comment not found in Shopify yet (might be indexing delay).");
         }
     }
 
-    // --- LOGIC B: STREAK CHECK (Runs on Reads AND Comments) ---
+    // --- LOGIC B: STREAK CHECK ---
     let today = formatInTimeZone(new Date(), STORE_TZ, 'yyyy-MM-dd');
     if (isDevMode && params.dev_date) today = params.dev_date;
 
@@ -125,11 +117,9 @@ export default async function handler(req, res) {
     let streakRewardEarned = false;
     let newTags = [];
 
-    // We only update the streak if the date has changed
     if (lastVisitDate !== today) {
         streakUpdated = true;
         
-        // Audit Trail
         if (!historyLog.includes(today)) {
             historyLog.unshift(today);
             historyLog = historyLog.slice(0, 60);
@@ -164,7 +154,6 @@ export default async function handler(req, res) {
     const mutationOps = [];
     let totalCredit = 0;
 
-    // 1. Prepare Streak/History Update
     if (streakUpdated || newTags.length > 0 || commentRewardEarned) {
         const inputs = [
             { namespace: "custom", key: "devotional_current_streak", value: String(currentStreak), type: "number_integer" },
@@ -183,7 +172,6 @@ export default async function handler(req, res) {
         mutationOps.push(`customerUpdate(input: ${JSON.stringify(customerInput).replace(/"([^"]+)":/g, '$1:')}) { userErrors { field message } }`);
     }
 
-    // 2. Prepare Credit
     if (streakRewardEarned) totalCredit += parseFloat(STREAK_REWARD);
     if (commentRewardEarned) totalCredit += parseFloat(COMMENT_REWARD);
 
@@ -191,19 +179,14 @@ export default async function handler(req, res) {
         const creditInput = {
             creditAmount: { amount: totalCredit.toFixed(2), currencyCode: CURRENCY_CODE }
         };
-        
         const creditMutation = `
             mutation Credit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
                 storeCreditAccountCredit(id: $id, creditInput: $creditInput) { userErrors { message } }
             }
         `;
-        await shopifyGraphql(creditMutation, {
-            id: customerGid,
-            creditInput
-        });
+        await shopifyGraphql(creditMutation, { id: customerGid, creditInput });
     }
 
-    // 3. Save Metafields (if any changes)
     if (streakUpdated || commentRewardEarned) {
         const input = {
             id: customerGid,
@@ -216,11 +199,18 @@ export default async function handler(req, res) {
             ]
         };
         if (newTags.length > 0) input.tags = [...customerData.tags, ...newTags];
-        
         await shopifyGraphql(`mutation Update($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
+    // --- FINAL STEP: EXTRACT BALANCE & RETURN ---
+    let creditBalance = "0.00";
+    if (customerData.storeCreditAccounts?.edges?.length > 0) {
+        creditBalance = customerData.storeCreditAccounts.edges[0].node.balance.amount;
+    }
+
     return res.status(200).json({ 
+        firstName: customerData.firstName || "Friend", 
+        creditBalance, 
         currentStreak, 
         totalDays, 
         rewardJustEarned: streakRewardEarned,
