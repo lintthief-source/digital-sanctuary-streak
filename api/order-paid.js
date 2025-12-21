@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import { Buffer } from 'buffer';
 
-const SHOPIFY_SECRET = process.env.SHOPIFY_API_SECRET;
+// Use the NEW variable here
+const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET; 
 const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 const REWARD_PERCENT = 0.05; 
@@ -25,16 +26,15 @@ export default async function handler(req, res) {
     const hmacHeader = req.headers['x-shopify-hmac-sha256'];
     const rawBody = await getRawBody(req);
     
+    // Verify using the WEBHOOK_SECRET
     const generatedHash = crypto
-      .createHmac('sha256', SHOPIFY_SECRET)
+      .createHmac('sha256', WEBHOOK_SECRET)
       .update(rawBody)
       .digest('base64');
 
     if (generatedHash !== hmacHeader) {
-      console.log("!!! SIGNATURE MISMATCH !!!");
-      console.log("Header:", hmacHeader);
-      console.log("Generated:", generatedHash);
-      // We are proceeding anyway just to test the credit logic!
+      console.error("HMAC Mismatch - Check WEBHOOK_SECRET");
+      return res.status(401).send('Unauthorized');
     }
 
     const order = JSON.parse(rawBody.toString());
@@ -51,7 +51,7 @@ export default async function handler(req, res) {
       }
     `;
 
-    const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
+    await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -68,7 +68,7 @@ export default async function handler(req, res) {
       }),
     });
 
-    return res.status(200).send(`Test Successful: Issued $${rewardAmount}`);
+    return res.status(200).send(`Success: Issued $${rewardAmount}`);
 
   } catch (error) {
     return res.status(500).json({ error: error.message });
