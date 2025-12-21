@@ -19,7 +19,8 @@ async function getRawBody(readable) {
 }
 
 async function shopifyGraphql(query, variables) {
-  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
+  // Use 2024-10: It's stable and supports the notify flag
+  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-10/graphql.json`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -56,6 +57,7 @@ export default async function handler(req, res) {
 
     if (parseFloat(rewardAmount) <= 0) return res.status(200).send('No reward');
 
+    // The mutation string stays the same, we just update the variables passed to it
     const mutation = `
       mutation CreditAndNote($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $customerInput: CustomerInput!) {
         storeCreditAccountCredit(id: $id, creditInput: $creditInput) { 
@@ -69,9 +71,10 @@ export default async function handler(req, res) {
     `;
 
     const variables = {
-      id: customerId,
+      id: customerGid,
       creditInput: {
-        creditAmount: { amount: rewardAmount, currencyCode: order.currency }
+        creditAmount: { amount: rewardAmount, currencyCode: order.currency },
+        notify: true // This is the magic flag
       },
       customerInput: {
         id: customerId,
@@ -79,7 +82,13 @@ export default async function handler(req, res) {
       }
     };
 
-    await shopifyGraphql(mutation, variables);
+    const result = await shopifyGraphql(mutation, variables);
+
+    // If there is a hidden error, this will help us see it in Vercel logs
+    if (result.data?.storeCreditAccountCredit?.userErrors?.length > 0) {
+      console.error("Shopify User Error:", result.data.storeCreditAccountCredit.userErrors);
+    }
+
     return res.status(200).send(`Issued $${rewardAmount}`);
 
   } catch (error) {
