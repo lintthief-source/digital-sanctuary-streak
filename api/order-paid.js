@@ -54,13 +54,13 @@ export default async function handler(req, res) {
 
     if (parseFloat(rewardAmount) <= 0) return res.status(200).send('No reward');
 
-    // FIXED MUTATION: notify is now a top-level argument, not inside creditInput
+    // notify is now correctly placed as an argument of the mutation itself
     const mutation = `
-      mutation CreditWithNotify($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $notify: Boolean!) {
+      mutation CreditWithNotify($id: ID!, $creditInput: StoreCreditAccountCreditInput!, $notify: Boolean!, $customerInput: CustomerInput!) {
         storeCreditAccountCredit(id: $id, creditInput: $creditInput, notify: $notify) { 
           userErrors { message } 
         }
-        customerUpdate(input: { id: $id, note: "${order.customer?.note || ''}\nIssued $${rewardAmount} credit for Order ${order.name}".trim() }) {
+        customerUpdate(input: $customerInput) {
           customer { id }
           userErrors { message }
         }
@@ -72,17 +72,21 @@ export default async function handler(req, res) {
       creditInput: {
         creditAmount: { amount: rewardAmount, currencyCode: order.currency }
       },
-      notify: true // Correctly placed as a separate variable
+      notify: true,
+      customerInput: {
+        id: customerId,
+        note: `${order.customer?.note || ''}\nIssued $${rewardAmount} credit for Order ${order.name}`.trim()
+      }
     };
 
     const result = await shopifyGraphql(mutation, variables);
 
     if (result.errors || result.data?.storeCreditAccountCredit?.userErrors?.length > 0) {
-      console.error("Shopify Error:", JSON.stringify(result));
+      console.error("Shopify Error Details:", JSON.stringify(result));
       return res.status(500).json({ error: "Mutation Failed", details: result });
     }
 
-    return res.status(200).send(`Success: Issued $${rewardAmount}`);
+    return res.status(200).send(`Success: Issued $${rewardAmount} with notification`);
 
   } catch (error) {
     return res.status(500).json({ error: error.message });
