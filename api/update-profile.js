@@ -13,6 +13,23 @@ async function shopifyGraphql(query, variables) {
   return await response.json();
 }
 
+// Helper to parse User Agent for the Ledger
+function parseUA(ua) {
+  let os = "Unknown OS";
+  if (ua.includes("Windows")) os = "Windows";
+  else if (ua.includes("Macintosh")) os = "macOS";
+  else if (ua.includes("iPhone")) os = "iOS (iPhone)";
+  else if (ua.includes("Android")) os = "Android";
+
+  let browser = "Unknown Browser";
+  if (ua.includes("Chrome")) browser = "Chrome";
+  else if (ua.includes("Safari")) browser = "Safari";
+  else if (ua.includes("Firefox")) browser = "Firefox";
+  else if (ua.includes("Edg")) browser = "Edge";
+
+  return { os, browser };
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*'); 
@@ -27,33 +44,32 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
     const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const uaInfo = parseUA(req.headers['user-agent'] || "");
     const location = `${req.headers['x-vercel-ip-city'] || 'Unknown City'}, ${req.headers['x-vercel-ip-country'] || 'CA'}`;
 
-    // 1. FETCH EXISTING HISTORY FIRST
+    // 1. FETCH EXISTING HISTORY
     const historyQuery = `query($id: ID!) { customer(id: $id) { audit: metafield(namespace: "custom", key: "profile_update_history") { value } } }`;
     const historyRes = await shopifyGraphql(historyQuery, { id: customerGid });
     
     let currentHistory = [];
     try {
-      if (historyRes.data?.customer?.audit?.value) {
-        currentHistory = JSON.parse(historyRes.data.customer.audit.value);
-      }
+      if (historyRes.data?.customer?.audit?.value) currentHistory = JSON.parse(historyRes.data.customer.audit.value);
     } catch (e) { currentHistory = []; }
 
-    // 2. CREATE NEW ENTRY
+    // 2. CREATE FINGERPRINTED ENTRY
     const newEntry = {
       date: new Date().toISOString(),
       location: location,
       ip: ip,
+      device: `${uaInfo.os} | ${uaInfo.browser}`,
       details: changeSummary,
       accepted: true
     };
-    currentHistory.unshift(newEntry); // Add to the top
-    const updatedHistoryJson = JSON.stringify(currentHistory.slice(0, 10)); // Keep last 10 events
+    currentHistory.unshift(newEntry);
+    const updatedHistoryJson = JSON.stringify(currentHistory.slice(0, 10));
 
-    // 3. EXECUTE TRIPLE HANDSHAKE (Profile, Email Consent, SMS Consent)
-    // Profile & Metafields (Now includes the history update)
-    const profileMutation = `mutation cu($i: CustomerInput!) { customerUpdate(input: $i) { customer { id } userErrors { field message } } }`;
+    // 3. THE TRIPLE HANDSHAKE
+    // Profile, Nickname, DOB, and THE NEW HISTORY
     const profileInput = {
       id: customerGid, email, firstName, lastName, phone,
       metafields: [
@@ -62,23 +78,17 @@ export default async function handler(req, res) {
         { namespace: "custom", key: "profile_update_history", value: updatedHistoryJson, type: "json" }
       ]
     };
-
     if (address && address.address1) {
       profileInput.addresses = [{ ...address, firstName, lastName, phone, country: "CA" }];
     }
+    await shopifyGraphql(`mutation cu($i: CustomerInput!) { customerUpdate(input: $i) { userErrors { message } } }`, { i: profileInput });
 
-    const pResult = await shopifyGraphql(profileMutation, { i: profileInput });
-    if (pResult.data?.customerUpdate?.userErrors?.length > 0) {
-      const err = pResult.data.customerUpdate.userErrors[0];
-      if (err.message.toLowerCase().includes("taken")) return res.status(400).json({ success: false, error: "EMAIL_EXISTS" });
-      return res.status(400).json({ success: false, error: err.message });
-    }
-
-    // Email & SMS Consents (Dedicated mutations)
+    // Email Consent
     await shopifyGraphql(`mutation e($i: CustomerEmailMarketingConsentUpdateInput!) { customerEmailMarketingConsentUpdate(input: $i) { userErrors { message } } }`, {
       i: { customerId: customerGid, emailMarketingConsent: { marketingState: consents.email ? "SUBSCRIBED" : "UNSUBSCRIBED", marketingOptInLevel: "SINGLE_OPT_IN" } }
     });
 
+    // SMS Consent
     await shopifyGraphql(`mutation s($i: CustomerSmsMarketingConsentUpdateInput!) { customerSmsMarketingConsentUpdate(input: $i) { userErrors { message } } }`, {
       i: { customerId: customerGid, smsMarketingConsent: { marketingState: consents.sms ? "SUBSCRIBED" : "UNSUBSCRIBED", marketingOptInLevel: "SINGLE_OPT_IN" } }
     });
