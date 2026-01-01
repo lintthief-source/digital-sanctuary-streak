@@ -4,6 +4,9 @@
   "main": "api/update-streak.js",
   "dependencies": {
     "date-fns": "^4.1.0",
-    "date-fns-tz": "^3.2.0"
+    "date-fns-tz": "^3.2.0",
+    "axios": "^1.7.0"
   }
+
 }
+
