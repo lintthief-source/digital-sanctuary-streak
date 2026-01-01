@@ -18,7 +18,7 @@ export default async function handler(req, res) {
         last_name: lastName,
         metafields: [
           { namespace: "custom", key: "nickname", value: nickname, type: "single_line_text_field" },
-          { namespace: "custom", key: "birthday", value: dob, type: "date" }
+          { namespace: "facts", key: "birth_date", value: dob, type: "date" }
         ]
       }
     };
