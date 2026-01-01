@@ -1,4 +1,3 @@
-// /api/update-profile.js
 const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 
@@ -28,26 +27,24 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    const mutation = `
+    // 1. MAIN PROFILE MUTATION (Handles everything EXCEPT SMS Consent)
+    const profileMutation = `
       mutation customerUpdate($input: CustomerInput!) {
         customerUpdate(input: $input) {
-          customer { id email }
+          customer { id }
           userErrors { field message }
         }
       }
     `;
 
-    const input = {
+    const profileInput = {
       id: customerGid,
-      email: email, // Update email
-      firstName: firstName,
-      lastName: lastName,
-      phone: phone, // Update main contact phone
+      email,
+      firstName,
+      lastName,
+      phone, // Syncs phone to account
       emailMarketingConsent: {
         marketingState: consents.email ? "SUBSCRIBED" : "UNSUBSCRIBED"
-      },
-      smsMarketingConsent: {
-        marketingState: consents.sms ? "SUBSCRIBED" : "UNSUBSCRIBED"
       },
       metafields: [
         { namespace: "custom", key: "nickname", value: nickname, type: "single_line_text_field" },
@@ -56,28 +53,41 @@ export default async function handler(req, res) {
     };
 
     if (address && address.address1) {
-      input.addresses = [{
-        address1: address.address1,
-        city: address.city,
-        province: address.province,
-        zip: address.zip,
-        country: "CA",
-        firstName: firstName,
-        lastName: lastName,
-        phone: phone // Sync phone to shipping address
+      profileInput.addresses = [{
+        ...address,
+        firstName,
+        lastName,
+        phone, // Syncs phone to shipping
+        country: "CA"
       }];
     }
 
-    const result = await shopifyGraphql(mutation, { input });
+    const profileResult = await shopifyGraphql(profileMutation, { input: profileInput });
 
-    if (result.data?.customerUpdate?.userErrors?.length > 0) {
-      const error = result.data.customerUpdate.userErrors[0];
-      // Check if email error is "taken"
-      if (error.message.toLowerCase().includes("taken") || error.message.toLowerCase().includes("exists")) {
-         return res.status(400).json({ success: false, error: "EMAIL_EXISTS" });
-      }
+    if (profileResult.data?.customerUpdate?.userErrors?.length > 0) {
+      const error = profileResult.data.customerUpdate.userErrors[0];
+      if (error.message.toLowerCase().includes("taken")) return res.status(400).json({ success: false, error: "EMAIL_EXISTS" });
       return res.status(400).json({ success: false, error: error.message });
     }
+
+    // 2. DEDICATED SMS CONSENT MUTATION (The "Double Handshake")
+    const smsMutation = `
+      mutation customerSmsMarketingConsentUpdate($input: CustomerSmsMarketingConsentUpdateInput!) {
+        customerSmsMarketingConsentUpdate(input: $input) {
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const smsInput = {
+      customerId: customerGid,
+      smsMarketingConsent: {
+        marketingState: consents.sms ? "SUBSCRIBED" : "UNSUBSCRIBED",
+        marketingOptInLevel: "SINGLE_OPT_IN" // Standard for most regions
+      }
+    };
+
+    await shopifyGraphql(smsMutation, { input: smsInput });
 
     return res.status(200).json({ success: true });
 
