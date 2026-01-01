@@ -25,36 +25,34 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
-  // 1. CAPTURE IDENTITY & PARAMETERS
   const customerIdFromHeader = req.headers['x-shopify-customer-id'];
   const { signature, ...params } = req.query;
 
-  // --- NEW: THE TRAFFIC CONTROLLER ---
-  // If the request is just to check opt-in status, run this and STOP here.
+  // --- 1. THE TRAFFIC CONTROLLER (PRIORITY) ---
+  // We check for the mode BEFORE the security check to allow profile syncing
   if (params.mode === 'get-profile-status') {
-      if (!customerIdFromHeader) return res.status(401).json({ error: "Unauthorized" });
-      
-      const statusQuery = `query($id: ID!) {
-        customer(id: $id) {
-          emailMarketingConsent { marketingState }
-          smsMarketingConsent { marketingState }
-        }
-      }`;
-      
-      try {
-        const statusResult = await shopifyGraphql(statusQuery, { id: `gid://shopify/Customer/${customerIdFromHeader}` });
-        const customer = statusResult.data.customer;
-        return res.status(200).json({
-          emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
-          smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
-        });
-      } catch (e) {
-        return res.status(500).json({ error: e.message });
+    if (!customerIdFromHeader) return res.status(401).json({ error: "Unauthorized" });
+    
+    const statusQuery = `query($id: ID!) {
+      customer(id: $id) {
+        emailMarketingConsent { marketingState }
+        smsMarketingConsent { marketingState }
       }
+    }`;
+    
+    try {
+      const statusResult = await shopifyGraphql(statusQuery, { id: `gid://shopify/Customer/${customerIdFromHeader}` });
+      const customer = statusResult.data.customer;
+      return res.status(200).json({
+        emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
+        smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
+      });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
   }
 
-  // ROUTE B: Existing Streak/Reward Logic
-  // ---------------------------------------------------------
+  // --- 2. EXISTING SECURITY CHECK (For Streaks/Rewards) ---
   let isDevMode = false;
   if (params.dev_key && params.dev_key === DEV_SECRET) {
     isDevMode = true;
@@ -66,6 +64,7 @@ export default async function handler(req, res) {
     }
   }
 
+  // --- 3. PROCEED WITH STREAK LOGIC ---
   const customerId = customerIdFromHeader || params.logged_in_customer_id || params.dev_customer_id;
   const currentArticleId = params.article_id; 
   const eventType = params.event_type; 
@@ -213,24 +212,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server Error', details: error.message });
   }
 }
-
-// NEW HANDLER FOR PROFILE CONSENT
-async function handleProfileStatus(customerId, res) {
-    const query = `query($id: ID!) {
-      customer(id: $id) {
-        emailMarketingConsent { marketingState }
-        smsMarketingConsent { marketingState }
-      }
-    }`;
-    try {
-      const result = await shopifyGraphql(query, { id: `gid://shopify/Customer/${customerId}` });
-      const customer = result.data.customer;
-      return res.status(200).json({
-        emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
-        smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
-      });
-    } catch (e) {
-      return res.status(500).json({ error: e.message });
-    }
-}
-
