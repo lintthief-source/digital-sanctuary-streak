@@ -46,7 +46,7 @@ export default async function handler(req, res) {
       }
     `;
 
-    // 3. BUILD THE INPUT OBJECT
+   // 3. BUILD THE INPUT OBJECT
     const input = {
       id: customerGid,
       firstName: firstName,
@@ -64,8 +64,9 @@ export default async function handler(req, res) {
         city: address.city,
         province: address.province,
         zip: address.zip,
-        country: "CA", // Shopify GraphQL expects ISO codes
-        firstName: firstName,
+        country: "CA",
+        // ADD THESE TWO LINES TO SYNC NAMES TO SHIPPING
+        firstName: firstName, 
         lastName: lastName
       }];
     }
