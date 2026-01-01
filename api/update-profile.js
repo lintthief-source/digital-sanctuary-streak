@@ -27,7 +27,7 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // 1. MAIN PROFILE MUTATION (Handles everything EXCEPT SMS Consent)
+    // 1. IDENTITY & ADDRESS (No Consent here)
     const profileMutation = `
       mutation customerUpdate($input: CustomerInput!) {
         customerUpdate(input: $input) {
@@ -42,10 +42,7 @@ export default async function handler(req, res) {
       email,
       firstName,
       lastName,
-      phone, // Syncs phone to account
-      emailMarketingConsent: {
-        marketingState: consents.email ? "SUBSCRIBED" : "UNSUBSCRIBED"
-      },
+      phone,
       metafields: [
         { namespace: "custom", key: "nickname", value: nickname, type: "single_line_text_field" },
         { namespace: "facts", key: "birth_date", value: dob, type: "date" }
@@ -57,7 +54,7 @@ export default async function handler(req, res) {
         ...address,
         firstName,
         lastName,
-        phone, // Syncs phone to shipping
+        phone,
         country: "CA"
       }];
     }
@@ -70,8 +67,27 @@ export default async function handler(req, res) {
       return res.status(400).json({ success: false, error: error.message });
     }
 
-    // 2. DEDICATED SMS CONSENT MUTATION (The "Double Handshake")
-    const smsMutation = `
+    // 2. EMAIL CONSENT MUTATION
+    const emailConsentMutation = `
+      mutation customerEmailMarketingConsentUpdate($input: CustomerEmailMarketingConsentUpdateInput!) {
+        customerEmailMarketingConsentUpdate(input: $input) {
+          userErrors { field message }
+        }
+      }
+    `;
+
+    await shopifyGraphql(emailConsentMutation, {
+      input: {
+        customerId: customerGid,
+        emailMarketingConsent: {
+          marketingState: consents.email ? "SUBSCRIBED" : "UNSUBSCRIBED",
+          marketingOptInLevel: "SINGLE_OPT_IN"
+        }
+      }
+    });
+
+    // 3. SMS CONSENT MUTATION
+    const smsConsentMutation = `
       mutation customerSmsMarketingConsentUpdate($input: CustomerSmsMarketingConsentUpdateInput!) {
         customerSmsMarketingConsentUpdate(input: $input) {
           userErrors { field message }
@@ -79,15 +95,15 @@ export default async function handler(req, res) {
       }
     `;
 
-    const smsInput = {
-      customerId: customerGid,
-      smsMarketingConsent: {
-        marketingState: consents.sms ? "SUBSCRIBED" : "UNSUBSCRIBED",
-        marketingOptInLevel: "SINGLE_OPT_IN" // Standard for most regions
+    await shopifyGraphql(smsConsentMutation, {
+      input: {
+        customerId: customerGid,
+        smsMarketingConsent: {
+          marketingState: consents.sms ? "SUBSCRIBED" : "UNSUBSCRIBED",
+          marketingOptInLevel: "SINGLE_OPT_IN"
+        }
       }
-    };
-
-    await shopifyGraphql(smsMutation, { input: smsInput });
+    });
 
     return res.status(200).json({ success: true });
 
