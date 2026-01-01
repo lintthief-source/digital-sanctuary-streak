@@ -1,4 +1,3 @@
-// /api/get-profile-status.js
 const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
 
@@ -15,15 +14,13 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
-  // SECURE IDENTITY: Derive ID from the Shopify Proxy Header
-  // This header is only present if the request comes through /apps/sanctuary
+  // Shopify App Proxy sends the ID in this specific header
   const customerId = req.headers['x-shopify-customer-id'];
 
   if (!customerId) {
-    return res.status(401).json({ error: "Unauthorized: No Sanctuary Identity detected via Proxy." });
+    // If this hits, the Proxy isn't sending the ID or you're calling Vercel directly
+    return res.status(401).json({ error: "No Identity Header found." });
   }
-
-  const customerGid = `gid://shopify/Customer/${customerId}`;
 
   const query = `
     query($id: ID!) {
@@ -35,14 +32,16 @@ export default async function handler(req, res) {
   `;
 
   try {
-    const result = await shopifyGraphql(query, { id: customerGid });
-    const customer = result.data.customer;
-    
-res.status(200).json({
-  emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
-  smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
-});
+    const result = await shopifyGraphql(query, { id: `gid://shopify/Customer/${customerId}` });
+    const customer = result.data?.customer;
+
+    if (!customer) throw new Error("Customer not found in Shopify records.");
+
+    return res.status(200).json({
+      emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
+      smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 }
