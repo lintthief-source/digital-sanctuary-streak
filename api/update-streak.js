@@ -25,16 +25,32 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
-  // 1. IDENTITY & ROUTE DETECTION
-  // Shopify App Proxy sends customer ID in the headers
+  // 1. CAPTURE IDENTITY & PARAMETERS
   const customerIdFromHeader = req.headers['x-shopify-customer-id'];
   const { signature, ...params } = req.query;
 
-  // ROUTE A: Profile Consent Check
-  // This handles the request from your Profile page
-  if (req.url.includes('get-profile-status')) {
+  // --- NEW: THE TRAFFIC CONTROLLER ---
+  // If the request is just to check opt-in status, run this and STOP here.
+  if (params.mode === 'get-profile-status') {
       if (!customerIdFromHeader) return res.status(401).json({ error: "Unauthorized" });
-      return await handleProfileStatus(customerIdFromHeader, res);
+      
+      const statusQuery = `query($id: ID!) {
+        customer(id: $id) {
+          emailMarketingConsent { marketingState }
+          smsMarketingConsent { marketingState }
+        }
+      }`;
+      
+      try {
+        const statusResult = await shopifyGraphql(statusQuery, { id: `gid://shopify/Customer/${customerIdFromHeader}` });
+        const customer = statusResult.data.customer;
+        return res.status(200).json({
+          emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
+          smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
+        });
+      } catch (e) {
+        return res.status(500).json({ error: e.message });
+      }
   }
 
   // ROUTE B: Existing Streak/Reward Logic
@@ -217,3 +233,4 @@ async function handleProfileStatus(customerId, res) {
       return res.status(500).json({ error: e.message });
     }
 }
+
