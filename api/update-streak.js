@@ -25,13 +25,18 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
+  // 1. CAPTURE IDENTITY
   const customerIdFromHeader = req.headers['x-shopify-customer-id'];
   const { signature, ...params } = req.query;
 
-  // --- 1. THE TRAFFIC CONTROLLER (PRIORITY) ---
-  // We check for the mode BEFORE the security check to allow profile syncing
+  // --- THE TRAFFIC CONTROLLER ---
+  // If mode is 'get-profile-status', we rely on the x-shopify-customer-id header
+  // and SKIP the HMAC signature check.
   if (params.mode === 'get-profile-status') {
-    if (!customerIdFromHeader) return res.status(401).json({ error: "Unauthorized" });
+    if (!customerIdFromHeader) {
+      console.error("DEBUG: Request arrived without Shopify Customer ID header.");
+      return res.status(401).json({ error: "Unauthorized: Missing Identity Header" });
+    }
     
     const statusQuery = `query($id: ID!) {
       customer(id: $id) {
@@ -41,18 +46,25 @@ export default async function handler(req, res) {
     }`;
     
     try {
+      // Use the ID provided securely by the Shopify Proxy header
       const statusResult = await shopifyGraphql(statusQuery, { id: `gid://shopify/Customer/${customerIdFromHeader}` });
-      const customer = statusResult.data.customer;
+      const customer = statusResult.data?.customer;
+      
+      if (!customer) throw new Error("Customer not found in Shopify Admin.");
+
       return res.status(200).json({
         emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
         smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
       });
     } catch (e) {
+      console.error("DEBUG: Profile Sync GraphQL Error:", e.message);
       return res.status(500).json({ error: e.message });
     }
   }
+  // --- END TRAFFIC CONTROLLER ---
 
-  // --- 2. EXISTING SECURITY CHECK (For Streaks/Rewards) ---
+  // 2. EXISTING SECURITY GATE (Only runs for Streaks/Rewards)
+  // This gate is why you were getting the 401 earlier.
   let isDevMode = false;
   if (params.dev_key && params.dev_key === DEV_SECRET) {
     isDevMode = true;
@@ -212,3 +224,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server Error', details: error.message });
   }
 }
+
