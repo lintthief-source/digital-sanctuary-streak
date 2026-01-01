@@ -38,10 +38,10 @@ export default async function handler(req, res) {
     const result = await shopifyGraphql(query, { id: customerGid });
     const customer = result.data.customer;
     
-    res.status(200).json({
-      emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
-      smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
-    });
+res.status(200).json({
+  emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
+  smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
+});
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
