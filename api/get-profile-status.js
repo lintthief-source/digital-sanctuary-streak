@@ -15,7 +15,14 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
-  const { customerId } = req.query;
+  // SECURE IDENTITY: Derive ID from the Shopify Proxy Header
+  // This header is only present if the request comes through /apps/sanctuary
+  const customerId = req.headers['x-shopify-customer-id'];
+
+  if (!customerId) {
+    return res.status(401).json({ error: "Unauthorized: No Sanctuary Identity detected via Proxy." });
+  }
+
   const customerGid = `gid://shopify/Customer/${customerId}`;
 
   const query = `
@@ -32,8 +39,8 @@ export default async function handler(req, res) {
     const customer = result.data.customer;
     
     res.status(200).json({
-      emailSubscribed: customer.emailMarketingConsent.marketingState === "SUBSCRIBED",
-      smsSubscribed: customer.smsMarketingConsent.marketingState === "SUBSCRIBED"
+      emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
+      smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
