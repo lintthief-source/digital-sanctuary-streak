@@ -25,9 +25,20 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
+  // 1. IDENTITY & ROUTE DETECTION
+  // Shopify App Proxy sends customer ID in the headers
+  const customerIdFromHeader = req.headers['x-shopify-customer-id'];
   const { signature, ...params } = req.query;
 
-  // 1. SECURITY CHECK
+  // ROUTE A: Profile Consent Check
+  // This handles the request from your Profile page
+  if (req.url.includes('get-profile-status')) {
+      if (!customerIdFromHeader) return res.status(401).json({ error: "Unauthorized" });
+      return await handleProfileStatus(customerIdFromHeader, res);
+  }
+
+  // ROUTE B: Existing Streak/Reward Logic
+  // ---------------------------------------------------------
   let isDevMode = false;
   if (params.dev_key && params.dev_key === DEV_SECRET) {
     isDevMode = true;
@@ -39,7 +50,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const customerId = params.logged_in_customer_id || params.dev_customer_id;
+  const customerId = customerIdFromHeader || params.logged_in_customer_id || params.dev_customer_id;
   const currentArticleId = params.article_id; 
   const eventType = params.event_type; 
 
@@ -48,7 +59,6 @@ export default async function handler(req, res) {
   try {
     const customerGid = `gid://shopify/Customer/${customerId}`;
 
-    // 2. FETCH EVERYTHING (NOW INCLUDES NAME & CREDIT)
     const query = `
       query($id: ID!) {
         customer(id: $id) {
@@ -56,7 +66,6 @@ export default async function handler(req, res) {
           email
           firstName 
           tags
-          # FETCH STORE CREDIT BALANCE
           storeCreditAccounts(first: 1) {
             edges {
               node {
@@ -98,8 +107,6 @@ export default async function handler(req, res) {
         if (commentsResult.data?.comments?.nodes?.length > 0) {
             commentRewardEarned = true;
             commentHistoryLog.push(String(currentArticleId));
-        } else {
-            console.log("Comment not found in Shopify yet (might be indexing delay).");
         }
     }
 
@@ -119,7 +126,6 @@ export default async function handler(req, res) {
 
     if (lastVisitDate !== today) {
         streakUpdated = true;
-        
         if (!historyLog.includes(today)) {
             historyLog.unshift(today);
             historyLog = historyLog.slice(0, 60);
@@ -136,7 +142,6 @@ export default async function handler(req, res) {
 
         if (isConsecutive) currentStreak += 1;
         else currentStreak = 1; 
-        
         totalDays += 1;
 
         if ([7, 15, 30, 60, 100, 365].includes(currentStreak)) {
@@ -151,39 +156,10 @@ export default async function handler(req, res) {
     }
 
     // --- LOGIC C: SAVE & PAY ---
-    const mutationOps = [];
-    let totalCredit = 0;
-
-    if (streakUpdated || newTags.length > 0 || commentRewardEarned) {
-        const inputs = [
-            { namespace: "custom", key: "devotional_current_streak", value: String(currentStreak), type: "number_integer" },
-            { namespace: "custom", key: "devotional_total_days", value: String(totalDays), type: "number_integer" },
-            { namespace: "custom", key: "devotional_last_visit", value: today, type: "date" },
-            { namespace: "custom", key: "devotional_history", value: JSON.stringify(historyLog), type: "json" },
-            { namespace: "custom", key: "devotional_comment_history", value: JSON.stringify(commentHistoryLog), type: "json" }
-        ];
-
-        const customerInput = {
-            id: customerGid,
-            metafields: inputs
-        };
-        if (newTags.length > 0) customerInput.tags = [...customerData.tags, ...newTags];
-        
-        mutationOps.push(`customerUpdate(input: ${JSON.stringify(customerInput).replace(/"([^"]+)":/g, '$1:')}) { userErrors { field message } }`);
-    }
-
-    if (streakRewardEarned) totalCredit += parseFloat(STREAK_REWARD);
-    if (commentRewardEarned) totalCredit += parseFloat(COMMENT_REWARD);
-
-    if (totalCredit > 0) {
-        const creditInput = {
-            creditAmount: { amount: totalCredit.toFixed(2), currencyCode: CURRENCY_CODE }
-        };
-        const creditMutation = `
-            mutation Credit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) {
-                storeCreditAccountCredit(id: $id, creditInput: $creditInput) { userErrors { message } }
-            }
-        `;
+    if (streakRewardEarned || commentRewardEarned) {
+        const totalCredit = (streakRewardEarned ? parseFloat(STREAK_REWARD) : 0) + (commentRewardEarned ? parseFloat(COMMENT_REWARD) : 0);
+        const creditInput = { creditAmount: { amount: totalCredit.toFixed(2), currencyCode: CURRENCY_CODE } };
+        const creditMutation = `mutation Credit($id: ID!, $creditInput: StoreCreditAccountCreditInput!) { storeCreditAccountCredit(id: $id, creditInput: $creditInput) { userErrors { message } } }`;
         await shopifyGraphql(creditMutation, { id: customerGid, creditInput });
     }
 
@@ -202,7 +178,6 @@ export default async function handler(req, res) {
         await shopifyGraphql(`mutation Update($input: CustomerInput!) { customerUpdate(input: $input) { userErrors { field message } } }`, { input });
     }
 
-    // --- FINAL STEP: EXTRACT BALANCE & RETURN ---
     let creditBalance = "0.00";
     if (customerData.storeCreditAccounts?.edges?.length > 0) {
         creditBalance = customerData.storeCreditAccounts.edges[0].node.balance.amount;
@@ -219,7 +194,26 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error("CRITICAL SERVER ERROR:", error);
     return res.status(500).json({ error: 'Server Error', details: error.message });
   }
+}
+
+// NEW HANDLER FOR PROFILE CONSENT
+async function handleProfileStatus(customerId, res) {
+    const query = `query($id: ID!) {
+      customer(id: $id) {
+        emailMarketingConsent { marketingState }
+        smsMarketingConsent { marketingState }
+      }
+    }`;
+    try {
+      const result = await shopifyGraphql(query, { id: `gid://shopify/Customer/${customerId}` });
+      const customer = result.data.customer;
+      return res.status(200).json({
+        emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
+        smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
+      });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
 }
