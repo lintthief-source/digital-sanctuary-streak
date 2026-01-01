@@ -1,71 +1,91 @@
+// /api/update-profile.js
+const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
+
+async function shopifyGraphql(query, variables) {
+  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': ADMIN_ACCESS_TOKEN,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  return await response.json();
+}
+
 export default async function handler(req, res) {
   // 1. CORS Headers (Infrastructure Level)
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*'); 
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // 2. Handle the "Pre-flight" OPTIONS request
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  const { customerId, firstName, lastName, nickname, dob, address, shop } = req.body;
-  const adminApiToken = process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN;
-  const shopDomain = shop || "ebenandink.myshopify.com";
+  const { customerId, firstName, lastName, nickname, dob, address } = req.body;
 
   try {
-    // 3. The Shopify Data Payload
-    const payload = {
-      customer: {
-        id: customerId,
-        first_name: firstName,
-        last_name: lastName,
-        metafields: [
-          { namespace: "custom", key: "nickname", value: nickname, type: "single_line_text_field" },
-          { namespace: "facts", key: "birth_date", value: dob, type: "date" }
-        ]
+    const customerGid = `gid://shopify/Customer/${customerId}`;
+
+    // 2. CONSTRUCT THE GRAPHQL MUTATION
+    const mutation = `
+      mutation customerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            firstName
+            lastName
+          }
+          userErrors {
+            field
+            message
+          }
+        }
       }
+    `;
+
+    // 3. BUILD THE INPUT OBJECT
+    const input = {
+      id: customerGid,
+      firstName: firstName,
+      lastName: lastName,
+      metafields: [
+        { namespace: "custom", key: "nickname", value: nickname, type: "single_line_text_field" },
+        { namespace: "facts", key: "birth_date", value: dob, type: "date" }
+      ]
     };
 
-    // Include Address if provided
+    // Add address if provided
     if (address && address.address1) {
-      payload.customer.addresses = [{
-        ...address,
-        first_name: firstName,
-        last_name: lastName,
-        default: true
+      input.addresses = [{
+        address1: address.address1,
+        city: address.city,
+        province: address.province,
+        zip: address.zip,
+        country: "CA", // Shopify GraphQL expects ISO codes
+        firstName: firstName,
+        lastName: lastName
       }];
     }
 
-    // 4. The Handshake (Using Native Fetch)
-    const response = await fetch(
-      `https://${shopDomain}/admin/api/2024-10/customers/${customerId}.json`,
-      {
-        method: 'PUT',
-        headers: {
-          'X-Shopify-Access-Token': adminApiToken,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      }
-    );
+    // 4. THE HANDSHAKE
+    const result = await shopifyGraphql(mutation, { input });
 
-    const result = await response.json();
-
-    if (!response.ok) {
-      console.error("Shopify API Error Details:", result);
-      return res.status(response.status).json({ success: false, error: result.errors });
+    if (result.errors || result.data?.customerUpdate?.userErrors?.length > 0) {
+      console.error("Shopify GraphQL Error:", result.errors || result.data.customerUpdate.userErrors);
+      return res.status(400).json({ 
+        success: false, 
+        error: "Update rejected by Shopify", 
+        details: result.errors || result.data.customerUpdate.userErrors 
+      });
     }
 
     return res.status(200).json({ success: true, message: "Sanctuary Records Updated" });
 
   } catch (error) {
-    console.error("System Error:", error.message);
+    console.error("CRITICAL SYSTEM ERROR:", error);
     return res.status(500).json({ success: false, error: error.message });
   }
 }
