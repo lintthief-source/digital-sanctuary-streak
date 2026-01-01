@@ -25,40 +25,46 @@ async function shopifyGraphql(query, variables) {
 }
 
 export default async function handler(req, res) {
-  // 1. CAPTURE IDENTITY
+  // 1. CAPTURE IDENTITY FROM PROXY HEADERS
+  // Shopify App Proxy securely injects these headers
   const customerIdFromHeader = req.headers['x-shopify-customer-id'];
   const { signature, ...params } = req.query;
 
   // --- THE TRAFFIC CONTROLLER ---
-  // If mode is 'get-profile-status', we rely on the x-shopify-customer-id header
-  // and SKIP the HMAC signature check.
+  // If the frontend is asking for status, we use the secure Proxy Header
   if (params.mode === 'get-profile-status') {
     if (!customerIdFromHeader) {
-      console.error("DEBUG: Request arrived without Shopify Customer ID header.");
+      // This is what you saw when you opened the link directly
       return res.status(401).json({ error: "Unauthorized: Missing Identity Header" });
     }
     
-    const statusQuery = `query($id: ID!) {
-      customer(id: $id) {
-        emailMarketingConsent { marketingState }
-        smsMarketingConsent { marketingState }
+    const statusQuery = `
+      query($id: ID!) {
+        customer(id: $id) {
+          emailMarketingConsent { marketingState }
+          smsMarketingConsent { marketingState }
+        }
       }
-    }`;
+    `;
     
     try {
-      // Use the ID provided securely by the Shopify Proxy header
-      const statusResult = await shopifyGraphql(statusQuery, { id: `gid://shopify/Customer/${customerIdFromHeader}` });
+      // Note: We use the header ID which is the absolute 'Source of Truth'
+      const statusResult = await shopifyGraphql(statusQuery, { 
+        id: `gid://shopify/Customer/${customerIdFromHeader}` 
+      });
+      
       const customer = statusResult.data?.customer;
       
-      if (!customer) throw new Error("Customer not found in Shopify Admin.");
+      if (!customer) {
+        return res.status(404).json({ error: "Customer not found in Admin" });
+      }
 
       return res.status(200).json({
         emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
         smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
       });
     } catch (e) {
-      console.error("DEBUG: Profile Sync GraphQL Error:", e.message);
-      return res.status(500).json({ error: e.message });
+      return res.status(500).json({ error: "Admin API Connection Failed", details: e.message });
     }
   }
   // --- END TRAFFIC CONTROLLER ---
@@ -224,4 +230,5 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server Error', details: error.message });
   }
 }
+
 
