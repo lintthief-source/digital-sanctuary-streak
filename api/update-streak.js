@@ -32,9 +32,8 @@ export default async function handler(req, res) {
   // Use the header first, fallback to the query param provided by Shopify Proxy
   const effectiveCustomerId = customerIdFromHeader || params.logged_in_customer_id;
 
-  // --- THE TRAFFIC CONTROLLER ---
+ // --- THE TRAFFIC CONTROLLER ---
   if (params.mode === 'get-profile-status') {
-    // If we have NO ID at all, the user isn't logged in or the proxy is misconfigured
     if (!effectiveCustomerId) {
       return res.status(401).json({ error: "Unauthorized: No Customer Identity Found" });
     }
@@ -44,6 +43,14 @@ export default async function handler(req, res) {
         customer(id: $id) {
           emailMarketingConsent { marketingState }
           smsMarketingConsent { marketingState }
+          storeCreditAccounts(first: 1) {
+            edges {
+              node {
+                balance { amount }
+              }
+            }
+          }
+          streak: metafield(namespace: "custom", key: "devotional_current_streak") { value }
         }
       }
     `;
@@ -54,17 +61,18 @@ export default async function handler(req, res) {
       });
 
       const customer = statusResult.data?.customer;
-      if (!customer) {
-        return res.status(404).json({ error: "Customer not found in Shopify Admin" });
-      }
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
 
-      // Return the statuses clearly for the frontend
+      const creditNode = customer.storeCreditAccounts?.edges[0]?.node;
+
       return res.status(200).json({
         emailSubscribed: customer.emailMarketingConsent?.marketingState === "SUBSCRIBED",
-        smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED"
+        smsSubscribed: customer.smsMarketingConsent?.marketingState === "SUBSCRIBED",
+        creditBalance: creditNode ? creditNode.balance.amount : "0.00",
+        currentStreak: customer.streak?.value || "0"
       });
     } catch (e) {
-      return res.status(500).json({ error: "Bridge Connection Failed", details: e.message });
+      return res.status(500).json({ error: "Bridge Failed", details: e.message });
     }
   }
   // --- END TRAFFIC CONTROLLER ---
@@ -230,6 +238,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server Error', details: error.message });
   }
 }
+
 
 
 
