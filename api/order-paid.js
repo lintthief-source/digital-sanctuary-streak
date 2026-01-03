@@ -1,34 +1,3 @@
-import crypto from 'crypto';
-import { Buffer } from 'buffer';
-
-const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET; 
-const ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-const SHOPIFY_DOMAIN = process.env.SHOPIFY_STORE_DOMAIN;
-
-export const config = {
-  api: { bodyParser: false },
-};
-
-async function getRawBody(readable) {
-  const chunks = [];
-  for await (const chunk of readable) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
-async function shopifyGraphql(query, variables) {
-  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-07/graphql.json`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': ADMIN_ACCESS_TOKEN,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  return await response.json();
-}
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
@@ -47,12 +16,11 @@ export default async function handler(req, res) {
 
     const order = JSON.parse(rawBody.toString());
     const customerId = order.customer?.admin_graphql_api_id;
-    const orderId = order.admin_graphql_api_id;
+    const orderId = order.admin_graphql_api_id; // <--- The GID for the Order
 
     if (!customerId) return res.status(200).send('Guest checkout');
 
     // --- 1. DOUBLE-DIP CHECK & FETCH CUSTOMER LEVEL ---
-    // We check the order for an existing rewardlevel to ensure we don't process twice
     const statusQuery = `
       query getOrderAndCustomer($orderId: ID!, $customerId: ID!) {
         order(id: $orderId) {
@@ -95,6 +63,7 @@ export default async function handler(req, res) {
           userErrors { message }
         }
         metafieldsSet(metafields: $orderMetafields) {
+          metafields { id key value }
           userErrors { message }
         }
       }
@@ -111,7 +80,7 @@ export default async function handler(req, res) {
       },
       orderMetafields: [
         {
-          ownerId: orderId,
+          ownerId: orderId, // This is the critical "Lock" target
           namespace: "custom",
           key: "rewardlevel",
           value: rewardPercentInt.toString(),
@@ -122,7 +91,9 @@ export default async function handler(req, res) {
 
     const result = await shopifyGraphql(mutation, variables);
     
-    // Check for GraphQL errors
+    // --- DEBUG LOGS FOR VERCEL CONSOLE ---
+    console.log('Mutation Result:', JSON.stringify(result));
+
     const errors = [
       ...(result.data?.storeCreditAccountCredit?.userErrors || []),
       ...(result.data?.customerUpdate?.userErrors || []),
